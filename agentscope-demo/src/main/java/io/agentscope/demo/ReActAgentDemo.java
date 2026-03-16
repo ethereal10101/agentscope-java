@@ -7,19 +7,25 @@ import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.OpenAIChatModel;
+import io.agentscope.core.plan.PlanNotebook;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 import io.agentscope.core.tool.Toolkit;
+import io.agentscope.core.tool.mcp.McpClientBuilder;
+import io.agentscope.core.tool.mcp.McpClientWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Mono;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * ReActAgent 演示示例
- *
+ * <p>
  * 这个示例展示了如何使用 ReActAgent 进行推理和行动。
  * ReActAgent 是一个结合了推理（Reasoning）和行动（Acting）的智能代理。
  */
@@ -37,19 +43,126 @@ public class ReActAgentDemo {
             return;
         }
 
+        // 获取基本URL
+        String baseUrl = System.getenv("OPEN_BASE_URL");
+        if (baseUrl == null || baseUrl.isEmpty()) {
+            logger.error("请设置环境变量 OPEN_BASE_URL");
+            return;
+        }
+
         Model model = OpenAIChatModel.builder()
                 .apiKey(apiKey)
                 .modelName("qwen3-coder-plus")
-                .baseUrl("http://192.168.3.192:10010")
+                .baseUrl(baseUrl)
                 .build();
 
         // 示例1: 基础使用
         //basicExample(model);
 
         // 示例2: 带工具的使用
-         toolExample(model);
+        //toolExample(model);
+
+        // 示例3: 带mcp工具的使用
+        mcpToolExample(model);
+
+        // 示例4: 计划
+        //planExample(model);
 
         logger.info("=== ReActAgent 演示结束 ===");
+    }
+
+    private static void mcpToolExample(Model model) {
+        // 示例3: mcp工具使用
+        McpClientWrapper mcpClient = McpClientBuilder.create("filesystem-mcp")
+                .stdioTransport("C:\\Users\\zzq\\Tools\\node\\node-v23.9.0-win-x64\\npx.cmd", "-y", "@modelcontextprotocol/server-filesystem", "D:\\ai\\test1")
+                .buildAsync()
+                .block();
+
+        InMemoryMemory memory = new InMemoryMemory();
+
+        // 注册 MCP 服务器的所有工具
+        Toolkit toolkit = new Toolkit();
+        toolkit.registerMcpClient(mcpClient).block();
+
+        ReActAgent agent = ReActAgent.builder()
+                .name("McpAgent")
+                .model(model)
+                .toolkit(toolkit)
+                .memory(memory)
+                .sysPrompt("You are a helpful assistant. You can use MCP tools to perform various tasks.")
+                .build();
+        Msg userMsg = Msg.builder()
+                .name("用户")
+                .role(MsgRole.USER)
+                .content(TextBlock.builder()
+                        .text("帮我读取文件 D:\\ai\\test1\\test.txt")
+                        .build())
+                .build();
+
+        logger.info("用户: {}", userMsg.getContent());
+
+        // 5. 调用 agent 进行回复（同步方式）
+        Msg response = agent.call(userMsg).block();
+
+        logger.info("助手: {}", response.getContent());
+
+        // 6. 查看记忆中的消息
+        List<Msg> messages = memory.getMessages();
+        logger.info("记忆中共有 {} 条消息", messages.size());
+
+    }
+
+
+    /* 执行计划需要工具配合, 加个文件读取写入工具 */
+    private static void planExample(Model model) {
+        logger.info("\n--- 示例3: 计划 ---");
+
+        // 2. 创建内存
+        InMemoryMemory memory = new InMemoryMemory();
+
+        PlanNotebook planNotebook = PlanNotebook.builder()
+                .maxSubtasks(10)  // 限制子任务数量
+                .build();
+
+
+        // 2. 创建工具包并注册工具
+        Toolkit toolkit = new Toolkit();
+        // 注册包含 @Tool 注解的工具类
+        toolkit.registerTool(List.of(new CalculatorTool(), new FileTool()));
+
+        // 3. 创建 ReActAgent
+        ReActAgent agent = ReActAgent.builder()
+                .name("PlanAgent")
+                .model(model)
+                .memory(memory)
+                .toolkit(toolkit)
+                .sysPrompt("You are a systematic assistant. For multi-step tasks:\n"
+                        + "1. Create a plan with create_plan tool\n"
+                        + "2. Execute subtasks one by one\n"
+                        + "3. Use finish_subtask after completing each\n"
+                        + "4. Call finish_plan when all done")
+                .planNotebook(planNotebook)
+                .build();
+
+        // 4. 创建用户消息
+        Msg userMsg = Msg.builder()
+                .name("用户")
+                .role(MsgRole.USER)
+                .content(TextBlock.builder()
+                        .text("帮我找下2024年英雄联盟冠军的获得者的家乡都市是什么")
+                        .build())
+                .build();
+
+        logger.info("用户: {}", userMsg.getContent());
+
+        // 5. 调用 agent 进行回复（同步方式）
+        Msg response = agent.call(userMsg).block();
+
+        logger.info("助手: {}", response.getContent());
+
+        // 6. 查看记忆中的消息
+        List<Msg> messages = memory.getMessages();
+        logger.info("记忆中共有 {} 条消息", messages.size());
     }
 
     /**
@@ -154,6 +267,27 @@ public class ReActAgentDemo {
             String time = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
             logger.info("当前时间: {}", time);
             return time;
+        }
+    }
+    private static final Map<String, String> fileStorage = new HashMap<>();
+    public static class FileTool {
+        @Tool(name = "write_file", description = "Write content to a file")
+        public Mono<String> writeFile(
+                @ToolParam(name = "filename", description = "File name") String filename,
+                @ToolParam(name = "content", description = "Content") String content) {
+            System.out.println("\n📝 [write_file] " + filename + " (" + content.length() + " chars)");
+            fileStorage.put(filename, content);
+            return Mono.just("File saved: " + filename);
+        }
+
+        @Tool(name = "read_file", description = "Read content from a file")
+        public Mono<String> readFile(
+                @ToolParam(name = "filename", description = "File name") String filename) {
+            System.out.println("\n📖 [read_file] " + filename);
+            if (!fileStorage.containsKey(filename)) {
+                return Mono.just("Error: File not found");
+            }
+            return Mono.just(fileStorage.get(filename));
         }
     }
 }
