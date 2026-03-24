@@ -512,8 +512,9 @@ public class ReActAgent extends StructuredOutputCapableAgent {
             return executeIteration(iter + 1);
         }
 
-        // Set chunk callback for streaming tool responses
-        toolkit.setChunkCallback((toolUse, chunk) -> notifyActingChunk(toolUse, chunk).subscribe());
+        // Forward tool chunks into ActingChunkEvent hooks without overwriting user callbacks.
+        toolkit.setInternalChunkCallback(
+                (toolUse, chunk) -> notifyActingChunk(toolUse, chunk).subscribe());
 
         // Execute only pending tools (those without results in memory)
         return notifyPreActingHooks(pendingToolCalls)
@@ -1438,7 +1439,7 @@ public class ReActAgent extends StructuredOutputCapableAgent {
                 case AGENTIC -> {
                     // Register knowledge retrieval tools
                     KnowledgeRetrievalTools tools =
-                            new KnowledgeRetrievalTools(aggregatedKnowledge);
+                            new KnowledgeRetrievalTools(aggregatedKnowledge, retrieveConfig);
                     agentToolkit.registerTool(tools);
                 }
                 case NONE -> {
